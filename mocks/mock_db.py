@@ -1,4 +1,3 @@
-# mocks/mock_db.py
 import sqlite3
 from datetime import datetime, timedelta
 import random
@@ -12,7 +11,7 @@ def create_mock_db(db_path="industrial.db", force=False):
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    # Suppression des tables existantes (pour recréer proprement)
+    # Suppression des tables existantes
     cursor.executescript("""
         DROP TABLE IF EXISTS mesures;
         DROP TABLE IF EXISTS capteurs;
@@ -55,7 +54,7 @@ def create_mock_db(db_path="industrial.db", force=False):
         );
     """)
 
-    # --- Insertion des machines ---
+    # --- Insertion des machines (10 machines) ---
     machines_data = [
         ("Presse A", "Presse", "2020-01-01"),
         ("Tour B", "Tour", "2021-05-10"),
@@ -70,7 +69,6 @@ def create_mock_db(db_path="industrial.db", force=False):
     ]
     cursor.executemany("INSERT INTO machines (nom, type, date_installation) VALUES (?, ?, ?)", machines_data)
 
-    # Récupération des IDs machines
     cursor.execute("SELECT id_machine, nom FROM machines")
     machines = cursor.fetchall()
 
@@ -81,66 +79,95 @@ def create_mock_db(db_path="industrial.db", force=False):
         ("pression", "bar"),
     ]
 
-    # Date de début des mesures (aujourd'hui - 89 jours)
     start_date = datetime.now().date() - timedelta(days=89)
 
     # Pour chaque machine, insérer les capteurs et les mesures
     for mid, mname in machines:
+        # Assigner des tendances spécifiques pour certaines machines
+        # Par exemple, machine "Presse A" aura des températures élevées
+        if mname == "Presse A":
+            temp_range = (75, 95)   # warning/critical
+            vib_range = (8, 15)     # warning/critical
+            press_range = (7, 11)   # warning/critical
+        elif mname == "Tour B":
+            temp_range = (70, 88)
+            vib_range = (7, 14)
+            press_range = (6, 10)
+        elif mname == "Compresseur F":
+            temp_range = (80, 98)   # very high
+            vib_range = (10, 18)
+            press_range = (8, 12)
+        else:
+            # normal range (safe)
+            temp_range = (20, 70)
+            vib_range = (0.5, 7)
+            press_range = (2, 6)
+
         for capteur_type, unite in capteur_types:
-            # Insérer le capteur
             cursor.execute(
                 "INSERT INTO capteurs (id_machine, type_capteur, unite) VALUES (?, ?, ?)",
                 (mid, capteur_type, unite)
             )
             capteur_id = cursor.lastrowid
 
-            # Générer les mesures sur 90 jours (start_date à start_date + 89)
+            # Générer les mesures sur 90 jours
             for i in range(90):
                 ts = start_date + timedelta(days=i)
-                # Valeurs réalistes selon le type de capteur
                 if capteur_type == "température":
-                    # Entre 15 et 85°C
-                    valeur = random.uniform(15, 85)
+                    valeur = random.uniform(*temp_range)
                 elif capteur_type == "vibration":
-                    # Entre 0.1 et 15 mm/s
-                    valeur = random.uniform(0.1, 15)
+                    valeur = random.uniform(*vib_range)
                 else:  # pression
-                    # Entre 1 et 10 bar
-                    valeur = random.uniform(1, 10)
-                # Ajouter une tendance ou un bruit ? Optionnel
+                    valeur = random.uniform(*press_range)
                 cursor.execute(
                     "INSERT INTO mesures (id_capteur, timestamp, valeur) VALUES (?, ?, ?)",
                     (capteur_id, ts, valeur)
                 )
 
-    # --- Événements de maintenance (10 événements aléatoires) ---
-    maintenance_descriptions = [
-        "Révision annuelle",
-        "Changement d'huile",
-        "Calibration des capteurs",
-        "Remplacement de courroie",
-        "Mise à jour logicielle",
-        "Nettoyage en profondeur",
-        "Contrôle de sécurité",
-        "Réparation d'urgence",
-        "Inspection trimestrielle",
-        "Remplacement de pièce usée"
+    # --- Événements de maintenance avec mots-clés critiques/alerte ---
+    maintenance_events = [
+        ("Révision annuelle", "normal"),
+        ("Changement d'huile", "normal"),
+        ("Calibration des capteurs", "normal"),
+        ("Remplacement de courroie", "warning"),
+        ("Mise à jour logicielle", "normal"),
+        ("Nettoyage en profondeur", "normal"),
+        ("Contrôle de sécurité", "normal"),
+        ("Réparation d'urgence", "critical"),
+        ("Inspection trimestrielle", "normal"),
+        ("Remplacement de pièce usée", "warning"),
+        ("ALARME : surchauffe détectée", "critical"),
+        ("Arrêt d'urgence suite à défaillance", "critical"),
+        ("Vibration excessive - maintenance requise", "warning"),
+        ("Fuite de pression critique", "critical"),
+        ("Stop machine pour surchauffe", "critical"),
     ]
-    # Dates aléatoires dans les 90 derniers jours
-    for _ in range(10):
-        # Choisir une machine aléatoire
-        machine = random.choice(machines)
+
+    # Créer des événements pour les machines problématiques
+    problematic_machines = [m for m in machines if m[1] in ["Presse A", "Tour B", "Compresseur F"]]
+    for _ in range(15):
+        # Choisir une machine (problématique plus souvent)
+        if random.random() < 0.7 and problematic_machines:
+            machine = random.choice(problematic_machines)
+        else:
+            machine = random.choice(machines)
         mid = machine[0]
         # Date aléatoire dans les 90 derniers jours
         rand_days = random.randint(0, 89)
         debut = start_date + timedelta(days=rand_days)
-        # Durée de l'intervention entre 1 et 8 heures
         duree = timedelta(hours=random.randint(1, 8))
         fin = debut + duree
-        description = random.choice(maintenance_descriptions)
+        desc, severity = random.choice(maintenance_events)
+        if severity == "critical":
+            # Ajouter un mot-clé critique si pas déjà présent
+            if not any(kw in desc.lower() for kw in ["critical", "alarme", "arrêt", "défaillance", "surchauffe", "stop"]):
+                desc = "CRITIQUE: " + desc
+        elif severity == "warning":
+            if not any(kw in desc.lower() for kw in ["warning", "excessive", "requise"]):
+                desc = "AVERTISSEMENT: " + desc
         cursor.execute(
             "INSERT INTO evenements_maintenance (id_machine, date_debut, date_fin, description) VALUES (?, ?, ?, ?)",
-            (mid, debut, fin, description)
+            (mid, debut, fin, desc)
         )
 
     conn.commit()
@@ -149,7 +176,7 @@ def create_mock_db(db_path="industrial.db", force=False):
     print(f" - Machines : {len(machines)}")
     print(f" - Capteurs : {len(machines) * len(capteur_types)}")
     print(f" - Mesures  : {len(machines) * len(capteur_types) * 90}")
-    print(f" - Événements maintenance : 10")
+    print(f" - Événements maintenance : 15 (incluant mots-clés critiques/alerte)")
 
 
 def get_mock_db_connection(db_path="industrial.db"):

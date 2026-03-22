@@ -1,13 +1,17 @@
-# api.py
 import json
 import logging
+import io  # <-- moved to top
+import math
+from collections import deque
 from contextlib import asynccontextmanager
 from typing import Optional, Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage, SystemMessage
+from PIL import Image, ImageDraw, ImageFont
 
 from mcp_tools import MCPToolkit
 from langgraph_agent import create_agent
@@ -20,7 +24,7 @@ nest_asyncio.apply()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialisation du toolkit et de l'agent (sera reconnecté dans lifespan)
+# Initialisation du toolkit et de l'agent
 toolkit = MCPToolkit()
 tools = toolkit.get_tools()
 agent = create_agent(tools)
@@ -28,30 +32,19 @@ agent = create_agent(tools)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Gestion du cycle de vie de l'application FastAPI.
-
-    - au startup : initialise et connecte le client MCP.
-    - au shutdown : ferme proprement la connexion MCP.
-
-    Args:
-        app (FastAPI): instance de l'application.
-    """
-    # Startup
     try:
         await toolkit._get_client()
         logger.info("✅ MCP client connected")
     except Exception as e:
         logger.error(f"❌ Failed to connect to MCP server: {e}")
-        # L'API peut continuer, mais les appels échoueront
     yield
-    # Shutdown
     await toolkit._close_client()
     logger.info("MCP client closed")
 
 
 app = FastAPI(title="Industrial Agent API", lifespan=lifespan)
 
-# CORS pour permettre l'accès depuis le frontend React (port 5173 par défaut)
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -70,37 +63,37 @@ class QuestionResponse(BaseModel):
     sql_query: Optional[str] = None
     results: Optional[Any] = None
     error: Optional[str] = None
+    decision: Optional[dict] = None
+    requires_human_intervention: Optional[bool] = False
 
-
+# ---------- API endpoints ----------
 @app.post("/ask", response_model=QuestionResponse)
 async def ask(request: QuestionRequest):
-    """Endpoint principal : reçoit une question en langage naturel et retourne la réponse de l'agent.
-
-    Flux :
-      1. Envoi la question au workflow agent.
-      2. Analyse le dernier message pour en extraire la réponse textuelle.
-      3. Extrait la requête SQL calculée (`execute_sql_query`) et le résultat des outils.
-      4. Retourne un `QuestionResponse` structuré.
-
-    Args:
-        request (QuestionRequest): Objet de requête contenant `question`.
-
-    Returns:
-        QuestionResponse: Réponse formatée avec `answer`, `sql_query`, `results`, `error`.
-    """
     try:
-        # Appel de l'agent
-        result = await agent.ainvoke({"messages": [HumanMessage(content=request.question)]})
+        system_prompt = """Tu es un agent SQL expert. Tu dois répondre aux questions des utilisateurs en interrogeant la base de données.
 
-        # Extraction robuste de la réponse finale
+**Règles strictes :**
+1. Utilise l'outil 'list_tables' pour connaître les tables disponibles.
+2. Utilise l'outil 'describe_table' pour connaître la structure des tables pertinentes.
+3. **IMPÉRATIF** : Après avoir compris la structure, tu DOIS utiliser l'outil 'execute_sql_query' pour exécuter une requête SQL SELECT qui répond directement à la question.
+   - Par exemple, si on demande "Quelle est la température moyenne des machines ?", tu dois exécuter : SELECT AVG(temperature) FROM machines.
+4. Enfin, fournis une réponse en langage naturel basée sur les résultats de la requête.
+
+N'oublie jamais d'exécuter une requête SQL. Pour les questions de données (température, temps d'arrêt, etc.), l'exécution SQL est obligatoire.
+"""
+        initial_messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=request.question)
+        ]
+        result = await agent.ainvoke({"messages": initial_messages})
+
+        # Extract answer
         last_msg = result["messages"][-1]
-
         if hasattr(last_msg, "content"):
             content = last_msg.content
             if isinstance(content, str):
                 answer = content
             elif isinstance(content, list):
-                # Gestion du format Gemini : liste de blocs
                 texts = []
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "text":
@@ -115,11 +108,10 @@ async def ask(request: QuestionRequest):
         else:
             answer = str(last_msg)
 
-        # Sécurité supplémentaire : si answer est une liste ou un dict, le transformer en texte
         if isinstance(answer, (list, dict)) and answer:
             answer = str(answer)
 
-        # Extraction de la dernière requête SQL et des résultats
+        # Extract SQL and results
         sql_query = None
         results = None
         for msg in result["messages"]:
@@ -127,14 +119,36 @@ async def ask(request: QuestionRequest):
                 for tc in msg.tool_calls:
                     if tc["name"] == "execute_sql_query":
                         sql_query = tc["args"]["query"]
-            elif isinstance(msg, ToolMessage) and msg.content:
+            elif isinstance(msg, ToolMessage) and msg.name == "execute_sql_query" and msg.content:
                 try:
                     results = json.loads(msg.content)
                 except json.JSONDecodeError:
                     results = msg.content
 
-        return QuestionResponse(answer=answer, sql_query=sql_query, results=results)
+        # Extract decision
+        decision = result.get("decision")
+        requires_human_intervention = result.get("requires_human_intervention", False)
+
+        return QuestionResponse(
+            answer=answer,
+            sql_query=sql_query,
+            results=results,
+            decision=decision,
+            requires_human_intervention=requires_human_intervention
+        )
 
     except Exception as e:
         logger.exception("Erreur dans l'agent")
         return QuestionResponse(error=str(e))
+
+
+@app.get("/api/workflow/graph.png")
+async def get_workflow_graph_image():
+    """Return a PNG image of the LangGraph workflow."""
+    try:
+        # Get the compiled agent's graph and render as PNG bytes
+        img_bytes = agent.get_graph().draw_mermaid_png()
+        return Response(content=img_bytes, media_type="image/png")
+    except Exception as e:
+        logger.error(f"Graph image generation error: {e}", exc_info=True)
+        return Response(content=b"Error generating graph", status_code=500)

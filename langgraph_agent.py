@@ -1,63 +1,87 @@
-# langgraph_agent.py
-from typing import Annotated, Sequence
-from langchain_core.messages import BaseMessage
+import json
+from typing import Annotated, Sequence, Optional, Dict, Any
+from langchain_core.messages import BaseMessage, ToolMessage, HumanMessage
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from llm_utils import get_langchain_llm
+from decision_simulator import DecisionSimulator
 
 
 class AgentState(dict):
-    """État de l'agent utilisé par LangGraph.
-
-    `messages` contient la séquence de messages échangés entre l'utilisateur,
-    le modèle, et les outils. Le décorateur `add_messages` assure la sérialisation
-    correcte et le suivi des messages à travers les transitions d'états.
-    """
-
     messages: Annotated[Sequence[BaseMessage], add_messages]
+    results: Optional[Any] = None
+    decision: Optional[Dict[str, Any]] = None
+    sql_executed: bool = False
+    loop_count: int = 0
 
 
 def create_agent(tools, recursion_limit: int = 10):
-    """Construit et compile un agent LangGraph via les outils fournis.
-
-    L'agent fonctionne en boucle :
-      1. Émet un appel modèle (`call_model`).
-      2. Si le modèle a généré des `tool_calls`, exécute l'outil.
-      3. Retourne au modèle (jusqu'à `recursion_limit`).
-
-    Args:
-        tools (list): Liste d'outils LangChain (`StructuredTool` ou équivalent).
-        recursion_limit (int): Nombre maximal d'itérations pour éviter les boucles infinies.
-
-    Returns:
-        Callable: Workflow compilé avec `StateGraph` prêt à être invoqué (`ainvoke`).
-    """
     llm = get_langchain_llm()
     llm_with_tools = llm.bind_tools(tools)
     tool_node = ToolNode(tools)
+    simulator = DecisionSimulator()
 
     def call_model(state):
-        """Étape du workflow qui appel le modèle avec les messages accumulés."""
         response = llm_with_tools.invoke(state["messages"])
         return {"messages": [response]}
 
     def should_continue(state):
-        """Décide si l'agent doit exécuter un outil ou terminer.
-
-        La condition est basée sur la présence de tool_calls dans le dernier message.
-        """
         last_message = state["messages"][-1]
-        # Si l'agent appelle des outils, on continue, sinon on termine
-        return "tools" if last_message.tool_calls else END
+        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+            return "tools"
+        return "simulate_decision"
+
+    def simulate_decision_node(state):
+        results = None
+        sql_called = False
+        for msg in reversed(state["messages"]):
+            if isinstance(msg, ToolMessage) and msg.name == "execute_sql_query":
+                try:
+                    results = json.loads(msg.content)
+                    sql_called = True
+                    if isinstance(results, dict) and "error" in results:
+                        results = None
+                except:
+                    results = None
+                break
+        decision = simulator.simulate(results) if results else {
+            "status": "no_data",
+            "message": "Aucune donnée SQL valide à analyser.",
+            "details": {},
+            "requires_human_intervention": False
+        }
+        return {"results": results, "decision": decision, "sql_executed": sql_called}
+
+    def check_sql_executed(state):
+        loop_count = state.get("loop_count", 0) + 1
+        state["loop_count"] = loop_count
+
+        if not state.get("sql_executed") and state["decision"]["status"] == "no_data" and loop_count < 3:
+            reminder = HumanMessage(
+                content="Tu n'as pas encore exécuté de requête SQL. Utilise l'outil 'execute_sql_query' pour répondre à la question. "
+                        "Assure-toi de bien construire la requête en fonction de la structure des tables que tu as décrites."
+            )
+            return {"messages": [reminder], "sql_executed": False, "loop_count": loop_count}
+        return {}
 
     workflow = StateGraph(AgentState)
+
     workflow.add_node("model", call_model)
     workflow.add_node("tools", tool_node)
+    workflow.add_node("simulate_decision", simulate_decision_node)
+    workflow.add_node("check_sql", check_sql_executed)
 
     workflow.set_entry_point("model")
-    workflow.add_conditional_edges("model", should_continue, {"tools": "tools", END: END})
+    workflow.add_conditional_edges("model", should_continue, {
+        "tools": "tools",
+        "simulate_decision": "simulate_decision"
+    })
     workflow.add_edge("tools", "model")
+    workflow.add_edge("simulate_decision", "check_sql")
+    workflow.add_conditional_edges(
+        "check_sql",
+        lambda state: "model" if state.get("loop_count", 0) < 3 and not state.get("sql_executed") else END
+    )
 
-    # Compile avec la limite de récursion (optionnel mais bien)
     return workflow.compile()
