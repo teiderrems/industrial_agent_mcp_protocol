@@ -36,7 +36,6 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [graphModalVisible, setGraphModalVisible] = useState(false);
   const [graphLoading, setGraphLoading] = useState(false);
-  const [graphMermaid, setGraphMermaid] = useState("");
   const abortControllerRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -172,7 +171,7 @@ function App() {
       if (axios.isCancel(error)) {
         setMessages((prev) => [
           ...prev,
-          { role: "assistant", content: "❌ Requête annulée.", error: true },
+          { role: "assistant", content: " Requête annulée.", error: true },
         ]);
       } else {
         setMessages((prev) => [
@@ -180,7 +179,7 @@ function App() {
           {
             role: "assistant",
             content:
-              "❌ Erreur : " +
+              " Erreur : " +
               (error.response?.data?.error ||
                 error.message ||
                 "Impossible de contacter le serveur."),

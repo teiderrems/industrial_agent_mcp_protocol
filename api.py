@@ -34,9 +34,9 @@ agent = create_agent(tools)
 async def lifespan(app: FastAPI):
     try:
         await toolkit._get_client()
-        logger.info("✅ MCP client connected")
+        logger.info("MCP client connected")
     except Exception as e:
-        logger.error(f"❌ Failed to connect to MCP server: {e}")
+        logger.error(f" Failed to connect to MCP server: {e}")
     yield
     await toolkit._close_client()
     logger.info("MCP client closed")
@@ -72,15 +72,15 @@ async def ask(request: QuestionRequest):
     try:
         system_prompt = """Tu es un agent SQL expert. Tu dois répondre aux questions des utilisateurs en interrogeant la base de données.
 
-**Règles strictes :**
-1. Utilise l'outil 'list_tables' pour connaître les tables disponibles.
-2. Utilise l'outil 'describe_table' pour connaître la structure des tables pertinentes.
-3. **IMPÉRATIF** : Après avoir compris la structure, tu DOIS utiliser l'outil 'execute_sql_query' pour exécuter une requête SQL SELECT qui répond directement à la question.
-   - Par exemple, si on demande "Quelle est la température moyenne des machines ?", tu dois exécuter : SELECT AVG(temperature) FROM machines.
-4. Enfin, fournis une réponse en langage naturel basée sur les résultats de la requête.
+        **Règles strictes :**
+        1. Utilise l'outil 'list_tables' pour connaître les tables disponibles.
+        2. Utilise l'outil 'describe_table' pour connaître la structure des tables pertinentes.
+        3. **IMPÉRATIF** : Après avoir compris la structure, tu DOIS utiliser l'outil 'execute_sql_query' pour exécuter une requête SQL SELECT qui répond directement à la question.
+        - Par exemple, si on demande "Quelle est la température moyenne des machines ?", tu dois exécuter : SELECT AVG(temperature) FROM machines.
+        4. Enfin, fournis une réponse en langage naturel basée sur les résultats de la requête.
 
-N'oublie jamais d'exécuter une requête SQL. Pour les questions de données (température, temps d'arrêt, etc.), l'exécution SQL est obligatoire.
-"""
+        N'oublie jamais d'exécuter une requête SQL. Pour les questions de données (température, temps d'arrêt, etc.), l'exécution SQL est obligatoire.
+        """
         initial_messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=request.question)
